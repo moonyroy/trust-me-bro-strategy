@@ -1,0 +1,239 @@
+//@version=6
+
+strategy(title = "Trust Me Bro Strategy", process_orders_on_close = true, max_lines_count = 500, max_labels_count = 500)
+
+//inputs
+use_ema      = input.bool(true, "Use EMA Filter", group = "Filters")
+use_fib      = input.bool(true, "Use Fib Filter", group = "Filters")
+use_ichimoku = input.bool(true, "Use Ichimoku Filter", group = "Filters")
+
+ema_len     = input.int(20, "EMA Length", group = "EMA")
+rsi_len     = input.int(14, "RSI Length", group = "RSI")
+
+rsi_buff    = input.float(5.0, "RSI retest buffer", group = "RSI")
+expiry_bars = input.int(30, "Setup expiry", group = "RSI")
+rsi_trig    = input.float(50.0, "RSI Trigger Level", group = "RSI")
+
+piv_left    = input.int(5, "Pivot left bars")
+piv_right   = input.int(5, "Pivot right bars")
+
+fib_lvl_1   = input.float(0.5  , "Fib level 1", group = "fibo")
+fib_lvl_2   = input.float(0.618, "Fib Level 2", group = "fibo")
+
+rr          = input.float(2.0, "Riward:Risk")
+
+do_long     = input.bool(true, "Trade Long")
+do_short    = input.bool(true, "Trade Short")
+
+show_ema    = input.bool(true, "Show EMA Line", group = "Display")
+show_div    = input.bool(false, "Show Divergence Lines", group = "Display")
+show_leg    = input.bool(false, "Show Fib Leg", group = "Display")
+show_fib    = input.bool(false, "Show Fib Bands", group = "Display")
+show_cloud  = input.bool(false, "Show Ichimoku", group = "Display")
+
+
+rsi_val = ta.rsi(close, rsi_len)
+ema_val = ta.ema(close, ema_len)
+
+plot(rsi_val)
+plot(show_ema ? ema_val : na, title = "EMA", force_overlay = true)
+hline(rsi_trig)
+
+//crossover and pullback/retest to rsi 50 
+
+cross_up = ta.crossover(rsi_val, rsi_trig)
+cross_dn = ta.crossunder(rsi_val, rsi_trig)
+
+var int   state      = 0
+var int   dir        = 0
+var int   state_bar  = na
+var bool  moved_away = false
+
+if state != 0 and bar_index - state_bar > expiry_bars
+    state := 0 , dir := 0 , moved_away := false
+
+if state == 0 and cross_up
+    dir := 1 , state := 1 , state_bar := bar_index , moved_away := false
+
+if state == 0 and cross_dn
+    dir := -1 , state := 1 , state_bar := bar_index , moved_away := false
+
+if state != 0 and ((dir == 1 and cross_dn) or (dir == -1 and cross_up))
+    state := 0 , dir := 0 , moved_away := false
+
+if state == 1
+    bool away_now   = dir == 1 ? rsi_val >  rsi_trig + rsi_buff : rsi_val <  rsi_trig - rsi_buff
+    bool retest_now = dir == 1 ? rsi_val <= rsi_trig + rsi_buff : rsi_val >= rsi_trig - rsi_buff
+
+    if not moved_away and away_now
+        moved_away := true
+    if moved_away and retest_now
+        state := 2 , state_bar := bar_index , moved_away := false
+
+
+//------------------------------------
+// finding hidden divergence
+
+float piv_low = ta.pivotlow(low, piv_left, piv_right)
+bool  low_new = not na(piv_low)
+
+var float prev_low     = na
+var float prev_low_rsi = na
+var float last_low     = na
+var float last_low_rsi = na
+var int   prev_low_bar = na
+var int   last_low_bar = na
+
+if low_new
+    prev_low := last_low , prev_low_bar := last_low_bar , prev_low_rsi := last_low_rsi
+    last_low := piv_low , last_low_bar := bar_index - piv_right , last_low_rsi := rsi_val[piv_right]
+
+bool have_lows    = not na(prev_low) and not na(last_low)
+bool low_price_up = last_low > prev_low
+bool low_rsi_dn   = last_low_rsi < prev_low_rsi
+bool bull_div     = have_lows and low_price_up and low_rsi_dn
+
+
+float piv_high = ta.pivothigh(high, piv_left, piv_right)
+bool  high_new = not na(piv_high)
+
+var float prev_high     = na
+var float prev_high_rsi = na
+var float last_high     = na
+var float last_high_rsi = na
+var int   prev_high_bar = na
+var int   last_high_bar = na
+
+if high_new
+    prev_high := last_high , prev_high_bar := last_high_bar , prev_high_rsi := last_high_rsi
+    last_high := piv_high , last_high_bar := bar_index - piv_right , last_high_rsi := rsi_val[piv_right]
+
+bool have_highs    = not na(prev_high) and not na(last_high)
+bool high_price_dn = last_high < prev_high
+bool high_rsi_up   = last_high_rsi > prev_high_rsi
+bool bear_div      = have_highs and high_price_dn and high_rsi_up
+
+if state == 2 and ((dir == 1 and bull_div) or (dir == -1 and bear_div))
+    state := 3 , state_bar := bar_index
+
+    if show_div
+        if dir == 1
+            line.new(prev_low_bar, prev_low, last_low_bar, last_low, color = color.green, width = 2, force_overlay = true)
+        if dir == -1
+            line.new(prev_high_bar, prev_high, last_high_bar, last_high, color = color.red, width = 2, force_overlay = true)
+
+bgcolor(state == 1 ? color.new(#cf7bcc, 50) :
+        state == 2 ? color.new(#85337d, 50)  :
+        state == 3 ? color.new(#ff00d4, 50) : na)
+
+//-----------------------------
+//ema condition 
+
+
+bool ema_touch = low <= ema_val and high >= ema_val
+bool ema_hit   = (not use_ema) or (ema_touch and state == 3)
+
+//plotshape(ema_hit, title = "EMA Zone Hit", style = shape.circle, location = location.belowbar, size = size.tiny, color = color.yellow, force_overlay = true)
+
+//-----------------
+//fibo
+bool have_leg = not na(last_low) and not na(last_high) and last_high > last_low
+
+float fib_rng  = last_high - last_low
+float fib_hi_1 = last_high - fib_rng * fib_lvl_1
+float fib_lo_2 = last_low + fib_rng * fib_lvl_2
+
+float fib_hi_2 = last_high - fib_rng * fib_lvl_2
+float fib_lo_1 = last_low + fib_rng * fib_lvl_1
+
+if show_leg and have_leg and (low_new or high_new)
+    line.new(last_low_bar, last_low, last_high_bar, last_high, color = color.rgb(236, 107, 236), style = line.style_dashed, width = 1, force_overlay = true)
+
+bool fib_hi_touch  = low <= fib_hi_1 and high >= fib_hi_2    // long band (below high)
+bool fib_lo_touch  = low <= fib_lo_2 and high >= fib_lo_1    // short band (above low)
+
+bool long_fib_hit  = (not use_fib) or (have_leg and fib_hi_touch and state == 3 and dir == 1)
+bool short_fib_hit = (not use_fib) or (have_leg and fib_lo_touch and state == 3 and dir == -1)
+
+plot((show_fib and have_leg and dir != -1) ? fib_hi_1 : na, title = "fib up 0.5  ",color = color.aqua    , style = plot.style_linebr, force_overlay = true)
+plot((show_fib and have_leg and dir != -1) ? fib_hi_2 : na, title = "fib up 0.618",color = color.fuchsia , style = plot.style_linebr, force_overlay = true)
+
+plot((show_fib and have_leg and dir == -1) ? fib_lo_2 : na, title = "fib dn 0.618", color = color.orange, style = plot.style_linebr, force_overlay = true)
+plot((show_fib and have_leg and dir == -1) ? fib_lo_1 : na, title = "fib dn 0.5  ", color = color.yellow, style = plot.style_linebr, force_overlay = true)
+
+//plotshape(long_fib_hit or short_fib_hit, title = "fib zone hit", style = shape.diamond, location = location.belowbar, size = size.tiny, color = color.aqua, force_overlay = true)
+ 
+//---------------------------------------------
+//ichimoku cloud
+
+tenkan_len = input.int(9 , minval=1, title="Conversion Line Length", group = "ichimokus inputs")
+kijun_len  = input.int(26, minval=1, title="Base Line Length", group = "ichimokus inputs")
+span_b_len = input.int(52, minval=1, title="Leading Span B Length", group = "ichimokus inputs")
+disp_len   = input.int(26, minval=1, title="Lagging Span", group = "ichimokus inputs")
+cloud_touch_mode = input.bool(true, "Cloud Touch Mode (ON = enter on cloud touch, OFF = long only above cloud / short only below cloud)", group = "ichimokus inputs")
+
+
+//cloud engine (HPotter Ichimoku2c style)
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+
+tenkan = donchian(tenkan_len)
+kijun  = donchian(kijun_len)
+
+span_a = donchian(span_b_len)[disp_len]                 // Donchian(52) shifted back 26
+span_b = (tenkan[kijun_len] + kijun[kijun_len]) / 2     // SenkouB, exactly as plotted in ichi.pine (no plot offset)
+
+float cloud_top = math.max(span_a, span_b)
+float cloud_bot = math.min(span_a, span_b)
+
+bool have_cloud  = not na(cloud_top) and not na(cloud_bot)
+bool cloud_touch = low <= cloud_top and high >= cloud_bot
+
+// position filter: touch mode, or price side of the cloud (long above / short below)
+bool cloud_above = close > cloud_top
+bool cloud_below = close < cloud_bot
+bool cloud_side_ok = cloud_touch_mode ? cloud_touch :
+                     dir == 1 ? cloud_above : cloud_below
+
+bool cloud_hit   = (not use_ichimoku) or (have_cloud and cloud_side_ok and state == 3)
+
+plot(show_cloud ? tenkan : na, title = "Tenkan-sen", color = color.blue, force_overlay = true)
+plot(show_cloud ? kijun : na, title = "Kijun-sen", color = color.maroon, force_overlay = true)
+
+plot_a = plot(show_cloud ? span_a : na, title = "Senkou Span A", color = color.purple, force_overlay = true)
+plot_b = plot(show_cloud ? span_b : na, title = "Senkou Span B", color = color.green, force_overlay = true)
+fill(plot_a, plot_b, color = color.new(color.teal, 85), title = "Kumo Cloud")
+
+plot(show_cloud ? close : na, title = "Chikou Span", color = color.teal, offset = -disp_len, force_overlay = true)
+
+
+//-------------------------------------------------
+//entry-exit
+
+bool any_hit = ema_hit and cloud_hit and (long_fib_hit or short_fib_hit)
+
+bool long_sig  = state == 3 and dir == 1  and any_hit and do_long
+bool short_sig = state == 3 and dir == -1 and any_hit and do_short
+
+if long_sig
+    float entry_price = close
+    float stop_price  = last_low
+    float risk_unit   = entry_price - stop_price
+    bool  risk_ok     = risk_unit > 0
+
+    if risk_ok
+        float tp_price = entry_price + risk_unit * rr
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long Exit", from_entry = "Long", stop = stop_price, limit = tp_price)
+        state := 0 , dir := 0 , moved_away := false
+
+if short_sig
+    float entry_price = close
+    float stop_price  = last_high
+    float risk_unit   = stop_price - entry_price
+    bool  risk_ok     = risk_unit > 0
+
+    if risk_ok
+        float tp_price = entry_price - risk_unit * rr
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short Exit", from_entry = "Short", stop = stop_price, limit = tp_price)
+        state := 0 , dir := 0 , moved_away := false
